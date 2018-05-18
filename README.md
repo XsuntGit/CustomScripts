@@ -1,2 +1,2 @@
 # CustomScripts
-Custom scripts (diff technology)
+Custom scripts (different technology)

@@ -1,34 +1,36 @@
-/****** Object:  StoredProcedure [dbo].[Sys_RestoreProdtoDev]    Script Date: 2/11/2018 3:50:39 PM ******/
+USE [master]
+GO
 SET ANSI_NULLS ON
 GO
 SET QUOTED_IDENTIFIER ON
 GO
 ALTER PROCEDURE [dbo].[Sys_RestoreProdtoDev]
 (
-	@dbname VARCHAR(8000),
-	@pathname VARCHAR(8000),
-	@movetopath VARCHAR(8000) = NULL,
+	@sourcedbname VARCHAR(255),
+	@targetdbname VARCHAR(255),
+	@pathname VARCHAR(255),
+	@movetopath VARCHAR(255) = NULL,
 	@FullOnly BIT = 0
 )
 AS
 SET NOCOUNT ON;
 
 CREATE TABLE #FinalOutput (FileDate DATETIME, FilePath VARCHAR(8000), OUTPUT VARCHAR(8000) NULL)
- 
+
 DECLARE @ret INT = 0;
 DECLARE @CMD VARCHAR(8000);
 SET @CMD =  'dir /O-d '+@pathname+'\*';
-CREATE TABLE #Output (ID INT IDENTITY(1,1), [OUTPUT] VARCHAR(8000) NULL) 
+CREATE TABLE #Output (ID INT IDENTITY(1,1), [OUTPUT] VARCHAR(8000) NULL)
 INSERT INTO #Output EXEC @ret = master.dbo.xp_cmdshell @CMD
 INSERT INTO #FinalOutput
 SELECT TRY_CONVERT(DATETIME,LEFT([OUTPUT],20)) AS FileDate,
 	@pathname AS FilePath,
 	[OUTPUT]
-FROM #Output  
-WHERE [OUTPUT] LIKE '%' + @dbname + '%'
+FROM #Output
+WHERE [OUTPUT] LIKE '%' + @sourcedbname + '%'
 	AND ([OUTPUT] LIKE '%.FULL%' OR [OUTPUT] LIKE '%.BAK%' OR [OUTPUT] LIKE '%.DIFF%')
 
---select * from #FinalOutput
+select * from #FinalOutput
 
 DROP TABLE #Output
 
@@ -36,13 +38,13 @@ DROP TABLE #Output
 SELECT [name]
 FROM sys.databases
 WHERE state_desc='online'
-AND [name] = @dbname
+AND [name] = @targetdbname
 if @@ROWCOUNT>0
 BEGIN
 
 	DECLARE @dynamic_statement_alterDB varchar (8000)
-	SET @dynamic_statement_alterDB = 'ALTER DATABASE ['+@dbname+'] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;'
-	--SELECT @dynamic_statement_alterDB
+	SET @dynamic_statement_alterDB = 'ALTER DATABASE ['+@targetdbname+'] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;'
+	SELECT @dynamic_statement_alterDB
 	EXEC (@dynamic_statement_alterDB)
 
 END
@@ -50,12 +52,12 @@ END
 DECLARE @destination VARCHAR(8000);
 DECLARE @dest_path VARCHAR(8000);
 
-SELECT TOP 1 @dest_path = FilePath, 
+SELECT TOP 1 @dest_path = FilePath,
 	@destination = SUBSTRING([OUTPUT] ,40, 1000)
 FROM #FinalOutput
-WHERE [OUTPUT] LIKE '%' + @dbname + '%'
+WHERE [OUTPUT] LIKE '%' + @sourcedbname + '%'
 	AND ([OUTPUT] LIKE '%.FULL%' OR [OUTPUT] LIKE '%.BAK%')
-ORDER BY FileDate DESC 
+ORDER BY FileDate DESC
 
 
 	DECLARE @fileListTable TABLE
@@ -84,18 +86,18 @@ ORDER BY FileDate DESC
 		SnapshotUrl          nvarchar(360)
 	)
 	SET @CMD = 'restore filelistonly from disk = ''' + @dest_path + '\' + @destination +''''
-	INSERT INTO @fileListTable EXEC(@CMD);
+	INSERT INTO @fileListTable EXEC (@CMD);
 
-	--select * from @fileListTable
-	
-SET @CMD = 'RESTORE DATABASE ['+@dbname+'] FROM  DISK = ''' + @dest_path + '\' + @destination +''' WITH FILE = 1,  NORECOVERY,  NOUNLOAD,  REPLACE,  STATS = 1 '
+	select * from @fileListTable
+
+SET @CMD = 'RESTORE DATABASE ['+@targetdbname+'] FROM  DISK = ''' + @dest_path + '\' + @destination +''' WITH FILE = 1,  NORECOVERY,  NOUNLOAD,  REPLACE,  STATS = 1 '
 
 DECLARE @LogicalName nvarchar(128),
 		@Type CHAR(1),
 		@PhysicalName nvarchar(260)
 
 DECLARE ProdToDEV_Cursor CURSOR LOCAL FAST_FORWARD READ_ONLY FOR
-SELECT LogicalName, 
+SELECT LogicalName,
 	[Type],
 	PhysicalName
 FROM @fileListTable
@@ -107,7 +109,7 @@ WHILE @@FETCH_STATUS = 0
 		DECLARE @Extention VARCHAR(10) = CASE @Type WHEN 'L' THEN '_LOG.ldf' ELSE '.mdf' END;
 
 		IF @movetopath is not NULL
-		SET @CMD = @CMD + ', MOVE '''+ @LogicalName + ''' TO ''' + @movetopath + '\' + @dbname + @Extention + ''''
+		SET @CMD = @CMD + ', MOVE '''+ @LogicalName + ''' TO ''' + @movetopath + '\' + @targetdbname + @Extention + ''''
 		ELSE
 		SET @CMD = @CMD + ', MOVE '''+ @LogicalName + ''' TO ''' + @PhysicalName + ''''
 
@@ -117,7 +119,7 @@ WHILE @@FETCH_STATUS = 0
 CLOSE ProdToDEV_Cursor;
 DEALLOCATE ProdToDEV_Cursor;
 
---SELECT @CMD
+SELECT @CMD
 EXEC (@CMD)
 
 IF @FullOnly = 1  GOTO Recovery_Steps;
@@ -125,19 +127,19 @@ IF @FullOnly = 1  GOTO Recovery_Steps;
 -- STEP 3: Restore DIFFS
 DECLARE Diff_outer_Cursor CURSOR LOCAL FAST_FORWARD READ_ONLY FOR
 SELECT TOP 1 FilePath,
-	SUBSTRING([OUTPUT] ,40, 1000) Destination 
+	SUBSTRING([OUTPUT] ,40, 1000) Destination
 FROM #FinalOutput D
 JOIN (
-		SELECT TOP 1 FileDate 
-		FROM #FinalOutput 
-		WHERE [OUTPUT] LIKE '%' + @dbname + '%'
+		SELECT TOP 1 FileDate
+		FROM #FinalOutput
+		WHERE [OUTPUT] LIKE '%' + @sourcedbname + '%'
 			AND ([OUTPUT] LIKE '%.FULL%' OR [OUTPUT] LIKE '%.BAK%')
 		ORDER BY FileDate DESC
-	) F 
+	) F
 ON F.FileDate < D.FileDate
-WHERE D.[OUTPUT] LIKE '%' + @dbname + '%'
-	AND D.[OUTPUT] LIKE '%.DIFF%' 
-ORDER BY D.FileDate DESC 
+WHERE D.[OUTPUT] LIKE '%' + @sourcedbname + '%'
+	AND D.[OUTPUT] LIKE '%.DIFF%'
+ORDER BY D.FileDate DESC
 
 	OPEN Diff_outer_Cursor;
 	FETCH NEXT FROM Diff_outer_Cursor INTO @dest_path, @destination;
@@ -170,12 +172,12 @@ ORDER BY D.FileDate DESC
 				SnapshotUrl          nvarchar(360)
 			)
 			SET @CMD = 'restore filelistonly from disk = '''+@dest_path + '\' + @destination+''''
-			INSERT INTO @fileListTable_diff EXEC(@CMD);
+			INSERT INTO @fileListTable_diff EXEC (@CMD);
 
-			--select * from @fileListTable_diff
+			select * from @fileListTable_diff
 
-			SET @CMD = 'RESTORE DATABASE ['+@dbname+'] FROM  DISK = '''+@dest_path + '\' + @destination+''' WITH FILE = 1,  NORECOVERY,  NOUNLOAD,  REPLACE,  STATS = 1 '
-	
+			SET @CMD = 'RESTORE DATABASE ['+@targetdbname+'] FROM  DISK = '''+@dest_path + '\' + @destination+''' WITH FILE = 1,  NORECOVERY,  NOUNLOAD,  REPLACE,  STATS = 1 '
+
 			DECLARE ProdToDEV_Cursor CURSOR LOCAL FAST_FORWARD READ_ONLY FOR
 			SELECT LogicalName,
 				[Type],
@@ -190,10 +192,10 @@ ORDER BY D.FileDate DESC
 					DECLARE @Extention_diff VARCHAR(10)= CASE @Type WHEN 'L' THEN '_LOG.ldf' ELSE '.mdf' END;
 
 					IF @movetopath is not NULL
-					SET @CMD = @CMD + ', MOVE '''+ @LogicalName + ''' TO ''' + @movetopath + '\' + @dbname + @Extention_diff + ''''
+					SET @CMD = @CMD + ', MOVE '''+ @LogicalName + ''' TO ''' + @movetopath + '\' + @targetdbname + @Extention_diff + ''''
 					ELSE
 					SET @CMD = @CMD + ', MOVE '''+ @LogicalName + ''' TO ''' + @PhysicalName + ''''
-	 
+
 					FETCH NEXT FROM ProdToDEV_Cursor INTO @LogicalName, @Type, @PhysicalName;
 
 			   END;
@@ -201,23 +203,23 @@ ORDER BY D.FileDate DESC
 			DEALLOCATE ProdToDEV_Cursor;
 
 			SELECT @CMD;
-			EXEC(@CMD)
+			EXEC (@CMD)
 
-		  FETCH NEXT FROM Diff_outer_Cursor INTO @dest_path, @destination; 
+		  FETCH NEXT FROM Diff_outer_Cursor INTO @dest_path, @destination;
 
 	   END;
 	CLOSE Diff_outer_Cursor;
 	DEALLOCATE Diff_outer_Cursor;
 
 Recovery_Steps:
-SET @dynamic_statement_alterDB = 'RESTORE DATABASE ['+@dbname+'] WITH RECOVERY'
---SELECT @dynamic_statement_alterDB		
-EXEC(@dynamic_statement_alterDB)
+SET @dynamic_statement_alterDB = 'RESTORE DATABASE ['+@targetdbname+'] WITH RECOVERY'
+SELECT @dynamic_statement_alterDB
+EXEC (@dynamic_statement_alterDB)
 
-SET @dynamic_statement_alterDB = 'ALTER DATABASE ['+@dbname+'] SET RECOVERY SIMPLE WITH NO_WAIT'
---SELECT @dynamic_statement_alterDB
-EXEC(@dynamic_statement_alterDB)
+SET @dynamic_statement_alterDB = 'ALTER DATABASE ['+@targetdbname+'] SET RECOVERY SIMPLE WITH NO_WAIT'
+SELECT @dynamic_statement_alterDB
+EXEC (@dynamic_statement_alterDB)
 
-SET @dynamic_statement_alterDB = 'ALTER DATABASE ['+@dbname+'] SET MULTI_USER'
---SELECT @dynamic_statement_alterDB
-EXEC(@dynamic_statement_alterDB)
+SET @dynamic_statement_alterDB = 'ALTER DATABASE ['+@targetdbname+'] SET MULTI_USER'
+SELECT @dynamic_statement_alterDB
+EXEC (@dynamic_statement_alterDB)
